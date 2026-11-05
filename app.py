@@ -5,12 +5,10 @@ from datetime import date, timedelta
 
 from flask import Flask, jsonify, request
 
+import notifications
 from policy import late_fine
 
 app = Flask(__name__)
-
-CURRENT_MEMBER = None
-
 
 def init_db():
     conn = sqlite3.connect("library.db")
@@ -81,22 +79,6 @@ def check(value, kind):
 
 def money(x):
     return round(float(x), 2)
-
-
-def notify(kind, title="", send=True):
-    if not send:
-        return
-    if kind == "checkout":
-        subject = "Book checked out"
-        body = "You checked out " + title
-    elif kind == "renew":
-        subject = "Loan renewed"
-        body = "You renewed " + title
-    else:
-        subject = "Library notice"
-        body = title
-    with open("outbox.txt", "a") as f:
-        f.write("TO: " + CURRENT_MEMBER[2] + " | SUBJECT: " + subject + " | BODY: " + body + "\n")
 
 
 # ---------- books ----------
@@ -305,7 +287,6 @@ def get_loan(loan_id):
 
 @app.route("/loans", methods=["POST"])
 def create_loan():
-    global CURRENT_MEMBER
     data = request.get_json(silent=True) or {}
     if not data.get("book_id") or not data.get("member_id"):
         return jsonify({"error": "book_id and member_id are required"}), 400
@@ -355,8 +336,7 @@ def create_loan():
     loan = conn.execute("SELECT * FROM loans WHERE id = ?", (cur.lastrowid,)).fetchone()
     conn.close()
 
-    CURRENT_MEMBER = member
-    notify("checkout", book[1])
+    notifications.checkout_confirmation(member[2], book[1])
 
     return (
         jsonify(
@@ -397,11 +377,7 @@ def return_book(loan_id):
     updated = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     conn.close()
 
-    with open("outbox.txt", "a") as f:
-        f.write(
-            "TO: " + member[2] + " | SUBJECT: Book returned | BODY: You returned " + book[1]
-            + ". Fine: $" + str(money(fine)) + "\n"
-        )
+    notifications.return_receipt(member[2], book[1], fine)
 
     return jsonify(
         {
@@ -420,7 +396,6 @@ def return_book(loan_id):
 
 @app.route("/loans/<int:loan_id>/renew", methods=["POST"])
 def renew_loan(loan_id):
-    global CURRENT_MEMBER
     conn = sqlite3.connect("library.db")
     loan = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     if loan is None:
@@ -439,12 +414,12 @@ def renew_loan(loan_id):
     new_due = (date.fromisoformat(loan[3]) + timedelta(days=14)).isoformat()
     conn.execute("UPDATE loans SET due_date = ?, renewals = renewals + 1 WHERE id = ?", (new_due, loan_id))
     conn.commit()
-    CURRENT_MEMBER = conn.execute("SELECT * FROM members WHERE id = ?", (loan[2],)).fetchone()
+    member = conn.execute("SELECT * FROM members WHERE id = ?", (loan[2],)).fetchone()
     book = conn.execute("SELECT * FROM books WHERE id = ?", (loan[1],)).fetchone()
     updated = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     conn.close()
 
-    notify("renew", book[1])
+    notifications.renewal_confirmation(member[2], book[1])
 
     return jsonify(
         {
@@ -481,10 +456,7 @@ def pay_fine(loan_id):
     updated = conn.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
     conn.close()
 
-    with open("outbox.txt", "a") as f:
-        f.write(
-            "TO: " + member[2] + " | SUBJECT: Fine paid | BODY: We received $" + str(money(loan[5])) + "\n"
-        )
+    notifications.payment_receipt(member[2], loan[5])
 
     return jsonify(
         {
