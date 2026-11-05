@@ -32,6 +32,8 @@ To reset the data, stop the API and delete `library.db`. It is recreated the nex
 
 ### 1. Diagnose (10 minutes)
 
+My diagnosis is in [DIAGNOSIS.md](DIAGNOSIS.md).
+
 Read `app.py` **without changing it**. List at least five design problems. For each one, note:
 
 - where it is
@@ -59,18 +61,48 @@ Your instructor will give you a new requirement. Implement it in your refactored
 
 | Measure | Before | After |
 |---|---|---|
-| Tests passing | | |
-| Lines in the largest file | | |
-| Places where the fine rate appears | | |
-| Route handlers containing SQL | | |
-| Places edited for the change request | n/a | |
-| Can the fine rule be tested without HTTP or a database? | | |
+| Tests passing | 53 / 53 | 53 / 53 in `test_api.py`, plus 9 new rule tests in `test_policy.py` (62 total) |
+| Lines in the largest file | 555 (`app.py`) | 228 (`services.py`); `app.py` is now 15 |
+| Places where the fine rate appears | 7 | 1 (`FINE_PER_DAY` in `policy.py`) |
+| Route handlers containing SQL | 16 of 16 | 0 of 16 (all SQL is in `repository.py`) |
+| Places edited for the change request | n/a | _fill in after class_ |
+| Can the fine rule be tested without HTTP or a database? | No | Yes: `policy.late_fine("2026-11-01", today=date(2026, 11, 5))` returns 2.0 (see `test_policy.py`) |
+
+The line counts leave out `test_api.py` (317 lines, unchanged).
+
+### New structure
+
+Each module only depends on the ones below it:
+
+| Module | Job |
+|---|---|
+| `app.py` | Builds the Flask app and creates the database on first run |
+| `api.py` | HTTP: reads the request, calls one service, returns JSON, maps errors to status codes |
+| `serializers.py` | The JSON shape of each record type |
+| `services.py` | The library's operations (check out, return, renew, pay a fine, reports) |
+| `policy.py` | The library's rules as pure functions: fines, loan limits, due dates, renewals |
+| `notifications.py` | Emails to members (`outbox.txt` is only known to `send_email`) |
+| `validation.py` | Format checks for email, ISBN, dates and member type |
+| `repository.py` | All SQL queries |
+| `db.py` | The connection, schema and sample data |
+
+The commits follow the refactoring steps: the fine rule first, then the global `CURRENT_MEMBER`, then the layers, then unit tests for the rules.
 
 ## Questions to answer
 
 1. Which module is the most cohesive? Describe its one job in a sentence.
+
+   `policy.py`. It states the library's rules (how fines, loan limits, due dates and renewals work) as functions that take plain values and return answers, with no Flask, SQL or files.
+
 2. Which dependency did you remove, and what can now change independently because of that?
+
+   I removed the routes' dependency on the database, and the notifications' dependency on the `CURRENT_MEMBER` global. Routes no longer contain SQL or read columns by position (`loan[4]`), so the schema can gain or reorder columns by editing `repository.py` alone. `notify` now receives the recipient's email as a parameter, so emails can be sent from anywhere, safely under concurrent requests, and the mail channel can change from `outbox.txt` to a real server by editing only `send_email`.
+
 3. What coupling remains, and why did you accept it?
+
+   - `services.py` imports `repository`, `policy` and `notifications` directly instead of receiving them as parameters. Injecting them would allow swapping in fakes, but for an app this size it adds indirection with little gain, and `policy` is already testable alone.
+   - The rest of the code still reads row fields by column name (`loan["due_date"]`), so a column rename would reach beyond `repository.py`. Mapping rows into separate model classes would remove that, but it would roughly double the code for a schema this small.
+   - The error messages (for example `"loan limit reached"`) live in `policy.py` and `services.py`, but they are part of the API's contract. I accepted this because they describe the rule that was broken, and `api.py` still decides the status code.
 
 ## API reference
 
